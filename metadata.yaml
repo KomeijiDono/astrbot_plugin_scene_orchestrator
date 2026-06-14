@@ -1,0 +1,7 @@
+name: astrbot_plugin_scene_orchestrator
+display_name: Scene Orchestrator 导演插件
+desc: 为 AstrBot 提供多角色剧情调度、场景推进和角色回复编排能力。
+version: v1.0.0
+author: KomeijiDono
+repo: "https://github.com/KomeijiDono/astrbot_plugin_scene_orchestrator"
+astrbot_version: ">=4.5.7"

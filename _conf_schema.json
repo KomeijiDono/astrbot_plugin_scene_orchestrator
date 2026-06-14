@@ -1,0 +1,81 @@
+{
+  "general": {
+    "description": "基础设置",
+    "type": "object",
+    "hint": "控制导演插件是否启用以及使用接管回复还是注入上下文模式。",
+    "items": {
+      "enabled": {
+        "description": "启用",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后插件不会接管消息，也不会注入场景上下文。"
+      },
+      "mode": {
+        "description": "运行模式",
+        "type": "string",
+        "default": "takeover",
+        "options": [
+          "takeover",
+          "inject"
+        ],
+        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文。"
+      },
+      "debug_mode": {
+        "description": "调试日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出导演决策和注入动作日志。"
+      }
+    }
+  },
+  "scene": {
+    "description": "场景设置",
+    "type": "object",
+    "hint": "控制剧情推进和世界状态历史。",
+    "items": {
+      "enable_auto_scene": {
+        "description": "自动推进场景",
+        "type": "bool",
+        "default": true,
+        "hint": "允许导演根据用户输入推进剧情场景。"
+      },
+      "max_events": {
+        "description": "最大事件数",
+        "type": "int",
+        "default": 100,
+        "hint": "世界状态中最多保留的历史事件数量。",
+        "slider": {
+          "min": 1,
+          "max": 1000,
+          "step": 1
+        }
+      }
+    }
+  },
+  "llm": {
+    "description": "LLM 设置",
+    "type": "object",
+    "hint": "控制导演决策解析策略。",
+    "items": {
+      "strict_json": {
+        "description": "严格 JSON",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后导演输出无法解析为 JSON 时会使用安全回退决策。"
+      }
+    }
+  },
+  "roles": {
+    "description": "角色设置",
+    "type": "object",
+    "hint": "控制角色选择的默认值。",
+    "items": {
+      "default_role": {
+        "description": "默认角色",
+        "type": "string",
+        "default": "anon_default",
+        "hint": "导演没有指定角色且规则无法判断时使用的角色 ID。"
+      }
+    }
+  }
+}
