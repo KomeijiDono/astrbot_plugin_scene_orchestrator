@@ -54,18 +54,34 @@ class AstrBotLLMClient:
         prompt: str,
         system_prompt: str = "",
         event: Any | None = None,
+        provider_id: str = "",
+        model: str = "",
     ) -> str:
-        provider = self._get_provider(event)
+        provider = self._get_provider(event, provider_id=provider_id)
         if provider is None:
             raise RuntimeError("No active AstrBot LLM provider is available")
 
-        response = await provider.text_chat(
-            prompt=prompt,
-            system_prompt=system_prompt,
-        )
+        kwargs = {"prompt": prompt, "system_prompt": system_prompt}
+        if model:
+            kwargs["model"] = model
+        response = await provider.text_chat(**kwargs)
         return str(getattr(response, "completion_text", "") or "")
 
-    def _get_provider(self, event: Any | None = None) -> Any:
+    def _get_provider(self, event: Any | None = None, provider_id: str = "") -> Any:
+        provider_id = str(provider_id or "").strip()
+        if provider_id:
+            get_provider_by_id = getattr(self.context, "get_provider_by_id", None)
+            if callable(get_provider_by_id):
+                provider = get_provider_by_id(provider_id)
+                if provider is not None:
+                    return provider
+            provider_manager = getattr(self.context, "provider_manager", None)
+            manager_getter = getattr(provider_manager, "get_provider_by_id", None)
+            if callable(manager_getter):
+                provider = manager_getter(provider_id)
+                if provider is not None:
+                    return provider
+
         umo = getattr(event, "unified_msg_origin", None)
         get_using_provider = getattr(self.context, "get_using_provider", None)
         if callable(get_using_provider):

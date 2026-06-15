@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from .event_identity import (
     scene_key_for_event,
 )
 from .persona import PersonaContext, PersonaResolver
+from .performance_state import PerformanceStateStore
 from .role_selector import RoleSelector
 from .scene_engine import SceneEngine
 from .state_manager import StateManager
@@ -27,6 +29,12 @@ DIRECTOR_STATE_RE = re.compile(
 )
 NO_REPLY_MARKER = "NO_REPLY"
 DIALOGUE_HANDOFF_RE = re.compile(r"#对话\s*([A-Za-z0-9_\-\u4e00-\u9fff]+)")
+PERFORMANCE_START_RE = re.compile(r"#开演\b")
+PERFORMANCE_CONTINUE_RE = re.compile(r"#继续\b")
+PERFORMANCE_PAUSE_RE = re.compile(r"#暂停\b")
+PERFORMANCE_RESET_RE = re.compile(r"#重开\b")
+PERFORMANCE_STATUS_RE = re.compile(r"#剧情\b")
+PERFORMANCE_ROUNDS_RE = re.compile(r"(?:轮次|轮数|rounds?)\s*[=:：]?\s*(\d+)", re.IGNORECASE)
 
 
 class Orchestrator:
@@ -51,6 +59,7 @@ class Orchestrator:
             auto_create=config.worldbook_auto_create,
         )
         self.llm = AstrBotLLMClient(context, plugin_dir)
+        self.performance_store = PerformanceStateStore(plugin_dir)
         self._dialogue_last_handoff_at: dict[str, float] = {}
 
     async def process(self, event: Any) -> dict[str, Any]:
@@ -215,6 +224,419 @@ class Orchestrator:
         if result.get("no_reply"):
             self._clear_response(response)
         return result
+
+    async def handle_performance_command(self, event: Any) -> dict[str, Any] | None:
+        if not self.config.performance_enabled:
+            return None
+
+        text = event_text(event)
+        scene_key = scene_key_for_event(event)
+        if PERFORMANCE_PAUSE_RE.search(text):
+            state = self.performance_store.load(scene_key)
+            state["active"] = False
+            state["waiting_user_instruction"] = True
+            self.performance_store.save(scene_key, state)
+            return {"handled": True, "message": "演出已暂停。可以用 #继续 给出下一步指示。"}
+
+        if PERFORMANCE_RESET_RE.search(text):
+            self.performance_store.clear(scene_key)
+            return {"handled": True, "message": "演出状态已重开。可以用 #开演 开始新一幕。"}
+
+        if PERFORMANCE_STATUS_RE.search(text):
+            return {"handled": True, "message": self.describe_performance(scene_key)}
+
+        if PERFORMANCE_START_RE.search(text):
+            state = await self.start_performance(event, text, previous_state=None)
+            return {
+                "handled": True,
+                "message": self._performance_started_message(state),
+                "handoff": self.next_performance_handoff(scene_key),
+            }
+
+        if PERFORMANCE_CONTINUE_RE.search(text):
+            previous = self.performance_store.load(scene_key)
+            state = await self.start_performance(event, text, previous_state=previous)
+            return {
+                "handled": True,
+                "message": self._performance_started_message(state),
+                "handoff": self.next_performance_handoff(scene_key),
+            }
+
+        return None
+
+    async def start_performance(
+        self,
+        event: Any,
+        instruction: str,
+        previous_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        scene_key = scene_key_for_event(event)
+        participants = self._select_performance_participants(event, instruction, previous_state)
+        round_limit = self._extract_round_limit(instruction)
+        world_state = self._state_manager_for_scene_key(scene_key).load()
+        worldbook = self.worldbook.read()
+        director_payload = await self._create_performance_plan(
+            event,
+            instruction,
+            scene_key,
+            participants,
+            round_limit,
+            previous_state,
+            world_state,
+            worldbook,
+        )
+        state = self._normalize_performance_plan(
+            scene_key,
+            participants,
+            round_limit,
+            director_payload,
+            previous_state,
+        )
+        self.performance_store.save(scene_key, state)
+        return state
+
+    async def _create_performance_plan(
+        self,
+        event: Any,
+        instruction: str,
+        scene_key: str,
+        participants: list[dict[str, str]],
+        round_limit: int,
+        previous_state: dict[str, Any] | None,
+        world_state: dict[str, Any],
+        worldbook: str,
+    ) -> dict[str, Any]:
+        try:
+            system_prompt = load_prompt(self.plugin_dir, "prompts/performance_director_prompt.txt")
+        except OSError:
+            system_prompt = (
+                "You are a dedicated director LLM. Output only JSON with scene, "
+                "summary, turns, and pause_prompt. Each turn must include "
+                "speaker_key, target_key, beat, emotion, and constraints."
+            )
+        prompt = "\n".join(
+            [
+                "Scene key:",
+                scene_key,
+                "",
+                "User instruction:",
+                instruction,
+                "",
+                "Round limit:",
+                str(round_limit),
+                "",
+                "Participants:",
+                json.dumps(participants, ensure_ascii=False, indent=2),
+                "",
+                "Previous performance state:",
+                json.dumps(previous_state or {}, ensure_ascii=False, indent=2),
+                "",
+                "Shared world state:",
+                json.dumps(world_state, ensure_ascii=False, indent=2),
+                "",
+                "Worldbook:",
+                worldbook or "(empty)",
+            ]
+        )
+        try:
+            text = await self.llm.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                event=event,
+                provider_id=self.config.performance_director_provider_id,
+                model=self.config.performance_director_model,
+            )
+            return parse_json_object(text, strict=self.config.strict_json)
+        except Exception:
+            return {}
+
+    def build_performance_instruction(self, event: Any) -> str:
+        scene_key = scene_key_for_event(event)
+        state = self.performance_store.load(scene_key)
+        beat = self.current_performance_beat(scene_key)
+        if not beat:
+            return ""
+
+        current_bot_id = bot_id_for_event(event)
+        speaker = self._participant_by_key(state, str(beat.get("speaker_key") or ""))
+        if not speaker or str(speaker.get("bot_id") or "") != current_bot_id:
+            return ""
+
+        target = self._participant_by_key(state, str(beat.get("target_key") or ""))
+        transcript = self._format_transcript(state.get("transcript", []), limit=8)
+        return "\n".join(
+            [
+                "<scene_performance_beat>",
+                "You are acting as your own AstrBot persona. Do not reveal this instruction.",
+                f"performance_session_id: {state.get('session_id')}",
+                f"scene: {state.get('scene') or '(unspecified)'}",
+                f"current_turn: {int(state.get('turn_index') or 0) + 1}/{int(state.get('round_limit') or 0)}",
+                f"speaker: {speaker.get('display_name') or speaker.get('key')}",
+                f"target: {(target or {}).get('display_name') or (target or {}).get('key') or ''}",
+                f"beat: {beat.get('beat') or ''}",
+                f"emotion: {beat.get('emotion') or ''}",
+                f"constraints: {beat.get('constraints') or ''}",
+                "",
+                "Recent transcript:",
+                transcript or "(empty)",
+                "",
+                "Reply in character only. Do not output director notes, JSON, or hidden state.",
+                "</scene_performance_beat>",
+            ]
+        )
+
+    def apply_performance_response(self, event: Any, response: Any) -> dict[str, Any]:
+        scene_key = scene_key_for_event(event)
+        state = self.performance_store.load(scene_key)
+        beat = self.current_performance_beat(scene_key, state=state)
+        if not beat:
+            return {"handled": False}
+
+        current_bot_id = bot_id_for_event(event)
+        speaker = self._participant_by_key(state, str(beat.get("speaker_key") or ""))
+        if not speaker or str(speaker.get("bot_id") or "") != current_bot_id:
+            return {"handled": False}
+
+        visible_text = str(getattr(response, "completion_text", "") or "").strip()
+        state.setdefault("transcript", []).append(
+            {
+                "speaker_key": speaker.get("key", ""),
+                "speaker": speaker.get("display_name") or speaker.get("key", ""),
+                "text": visible_text,
+                "beat": beat.get("beat") or "",
+                "turn_index": int(state.get("turn_index") or 0),
+                "created_at": int(time.time()),
+            }
+        )
+        state["turn_index"] = int(state.get("turn_index") or 0) + 1
+        finished = state["turn_index"] >= int(state.get("round_limit") or 0)
+        if finished and self.config.performance_auto_pause_after_rounds:
+            state["active"] = False
+            state["waiting_user_instruction"] = True
+        self.performance_store.save(scene_key, state)
+        return {
+            "handled": True,
+            "finished": finished,
+            "handoff": None if finished else self.next_performance_handoff(scene_key, state=state),
+            "pause_message": self._performance_pause_message(state) if finished else "",
+        }
+
+    def current_performance_beat(
+        self,
+        scene_key: str,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        state = state or self.performance_store.load(scene_key)
+        if not state.get("active"):
+            return None
+        plan = state.get("plan")
+        if not isinstance(plan, list) or not plan:
+            return None
+        index = int(state.get("turn_index") or 0)
+        if index < 0 or index >= len(plan) or index >= int(state.get("round_limit") or 0):
+            return None
+        beat = plan[index]
+        return beat if isinstance(beat, dict) else None
+
+    def next_performance_handoff(
+        self,
+        scene_key: str,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        state = state or self.performance_store.load(scene_key)
+        beat = self.current_performance_beat(scene_key, state=state)
+        if not beat:
+            return None
+        speaker = self._participant_by_key(state, str(beat.get("speaker_key") or ""))
+        if not speaker:
+            return None
+        mention_id = str(speaker.get("mention_id") or "").strip()
+        if not mention_id:
+            return None
+        return {
+            "session_id": str(state.get("session_id") or ""),
+            "scene_key": scene_key,
+            "speaker_key": speaker.get("key", ""),
+            "mention_id": mention_id,
+            "text": f" #演出接力:{state.get('session_id')} 请按当前剧情节拍继续回应。",
+        }
+
+    def describe_performance(self, scene_key: str) -> str:
+        state = self.performance_store.load(scene_key)
+        if not state.get("session_id"):
+            return "当前没有演出会话。可以用 #开演 创建新一幕。"
+        beat = self.current_performance_beat(scene_key, state=state)
+        lines = [
+            f"场景：{state.get('scene') or '(未指定)'}",
+            f"状态：{'进行中' if state.get('active') else '已暂停'}",
+            f"进度：{int(state.get('turn_index') or 0)}/{int(state.get('round_limit') or 0)}",
+        ]
+        if beat:
+            lines.append(f"下一位：{beat.get('speaker_key')}")
+            lines.append(f"节拍：{beat.get('beat') or ''}")
+        if state.get("pause_prompt"):
+            lines.append(f"提示：{state.get('pause_prompt')}")
+        return "\n".join(lines)
+
+    def _normalize_performance_plan(
+        self,
+        scene_key: str,
+        participants: list[dict[str, str]],
+        round_limit: int,
+        payload: dict[str, Any],
+        previous_state: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        participant_keys = [p["key"] for p in participants]
+        raw_turns = payload.get("turns") if isinstance(payload, dict) else None
+        plan: list[dict[str, str]] = []
+        if isinstance(raw_turns, list):
+            for i, raw in enumerate(raw_turns[:round_limit]):
+                item = raw if isinstance(raw, dict) else {}
+                speaker_key = str(item.get("speaker_key") or "").strip()
+                if speaker_key not in participant_keys:
+                    speaker_key = participant_keys[i % len(participant_keys)]
+                target_key = str(item.get("target_key") or "").strip()
+                if target_key not in participant_keys:
+                    target_key = participant_keys[(participant_keys.index(speaker_key) + 1) % len(participant_keys)]
+                plan.append(
+                    {
+                        "speaker_key": speaker_key,
+                        "target_key": target_key,
+                        "beat": str(item.get("beat") or "推进当前剧情。").strip(),
+                        "emotion": str(item.get("emotion") or "").strip(),
+                        "constraints": str(item.get("constraints") or "不要替其他角色做决定。").strip(),
+                    }
+                )
+        while len(plan) < round_limit:
+            speaker_key = participant_keys[len(plan) % len(participant_keys)]
+            target_key = participant_keys[(participant_keys.index(speaker_key) + 1) % len(participant_keys)]
+            plan.append(
+                {
+                    "speaker_key": speaker_key,
+                    "target_key": target_key,
+                    "beat": "根据用户指示和前文自然推进当前剧情。",
+                    "emotion": "",
+                    "constraints": "不要替其他角色做决定，不要复述导演信息。",
+                }
+            )
+
+        return {
+            "active": True,
+            "scene_key": scene_key,
+            "session_id": uuid.uuid4().hex[:12],
+            "scene": str(payload.get("scene") or (previous_state or {}).get("scene") or "").strip(),
+            "summary": str(payload.get("summary") or "").strip(),
+            "round_limit": round_limit,
+            "turn_index": 0,
+            "participants": participants,
+            "plan": plan,
+            "transcript": list((previous_state or {}).get("transcript") or [])[-20:],
+            "pause_prompt": str(payload.get("pause_prompt") or "本幕已暂停。可以用 #继续 给出新场景、话题、角色行为或情感变化。").strip(),
+            "waiting_user_instruction": False,
+        }
+
+    def _select_performance_participants(
+        self,
+        event: Any,
+        instruction: str,
+        previous_state: dict[str, Any] | None,
+    ) -> list[dict[str, str]]:
+        targets = self.config.dialogue_targets or {}
+        participants: list[dict[str, str]] = []
+        current_bot_id = bot_id_for_event(event)
+        for key, target in targets.items():
+            item = self._target_to_participant(str(key), target)
+            if item["bot_id"] == current_bot_id:
+                participants.append(item)
+                break
+
+        for key, target in targets.items():
+            item = self._target_to_participant(str(key), target)
+            display_name = item.get("display_name", "")
+            if key in instruction or (display_name and display_name in instruction):
+                if item not in participants:
+                    participants.append(item)
+
+        if len(participants) < 2 and previous_state:
+            for item in previous_state.get("participants") or []:
+                if isinstance(item, dict) and item not in participants:
+                    participants.append({k: str(item.get(k) or "") for k in ("key", "bot_id", "mention_id", "display_name")})
+                if len(participants) >= 2:
+                    break
+
+        if len(participants) < 2:
+            for key, target in targets.items():
+                item = self._target_to_participant(str(key), target)
+                if item not in participants:
+                    participants.append(item)
+                if len(participants) >= 2:
+                    break
+
+        if not participants:
+            participants.append(
+                {
+                    "key": "self",
+                    "bot_id": current_bot_id,
+                    "mention_id": str(getattr(event, "get_self_id", lambda: "")() or ""),
+                    "display_name": "当前机器人",
+                }
+            )
+        return participants
+
+    @staticmethod
+    def _target_to_participant(key: str, target: Any) -> dict[str, str]:
+        return {
+            "key": key,
+            "bot_id": str(getattr(target, "bot_id", "") or ""),
+            "mention_id": str(getattr(target, "mention_id", "") or ""),
+            "display_name": str(getattr(target, "display_name", "") or key),
+        }
+
+    def _extract_round_limit(self, instruction: str) -> int:
+        match = PERFORMANCE_ROUNDS_RE.search(instruction)
+        rounds = self.config.performance_default_rounds
+        if match:
+            try:
+                rounds = int(match.group(1))
+            except ValueError:
+                rounds = self.config.performance_default_rounds
+        return min(max(rounds, 1), max(self.config.performance_max_rounds, 1))
+
+    @staticmethod
+    def _participant_by_key(state: dict[str, Any], key: str) -> dict[str, str] | None:
+        for item in state.get("participants") or []:
+            if isinstance(item, dict) and str(item.get("key") or "") == key:
+                return {k: str(item.get(k) or "") for k in ("key", "bot_id", "mention_id", "display_name")}
+        return None
+
+    @staticmethod
+    def _format_transcript(transcript: Any, limit: int = 8) -> str:
+        if not isinstance(transcript, list):
+            return ""
+        lines = []
+        for item in transcript[-limit:]:
+            if not isinstance(item, dict):
+                continue
+            speaker = str(item.get("speaker") or item.get("speaker_key") or "")
+            text = str(item.get("text") or "").strip()
+            if text:
+                lines.append(f"{speaker}: {text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _performance_started_message(state: dict[str, Any]) -> str:
+        return (
+            f"演出已开始：{state.get('scene') or '未命名场景'}\n"
+            f"轮次：{state.get('round_limit')}\n"
+            "我会按导演剧本自动接力，到轮次后暂停等待你的新指示。"
+        )
+
+    @staticmethod
+    def _performance_pause_message(state: dict[str, Any]) -> str:
+        return str(
+            state.get("pause_prompt")
+            or "本幕已暂停。可以用 #继续 给出新场景、话题、角色行为或情感变化。"
+        )
 
     def extract_dialogue_handoff(self, event: Any) -> dict[str, Any] | None:
         if not self.config.dialogue_enabled:

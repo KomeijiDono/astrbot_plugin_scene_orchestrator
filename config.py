@@ -32,6 +32,13 @@ class SceneOrchestratorConfig:
     dialogue_handoff_delay_seconds: int = 2
     dialogue_cooldown_seconds: int = 10
     dialogue_targets: dict[str, DialogueTarget] | None = None
+    performance_enabled: bool = True
+    performance_default_rounds: int = 4
+    performance_max_rounds: int = 10
+    performance_handoff_delay_seconds: int = 2
+    performance_director_provider_id: str = ""
+    performance_director_model: str = ""
+    performance_auto_pause_after_rounds: bool = True
 
 
 def _get_group_value(
@@ -207,4 +214,33 @@ def load_config(config: Any) -> SceneOrchestratorConfig:
             minimum=0,
         ),
         dialogue_targets=dialogue_targets,
+        performance_enabled=_as_bool(
+            _get_group_value(config, "performance", "enabled", True),
+            True,
+        ),
+        performance_default_rounds=_as_int(
+            _get_group_value(config, "performance", "default_rounds", 4),
+            4,
+            minimum=1,
+        ),
+        performance_max_rounds=_as_int(
+            _get_group_value(config, "performance", "max_rounds", 10),
+            10,
+            minimum=1,
+        ),
+        performance_handoff_delay_seconds=_as_int(
+            _get_group_value(config, "performance", "handoff_delay_seconds", 2),
+            2,
+            minimum=0,
+        ),
+        performance_director_provider_id=str(
+            _get_group_value(config, "performance", "director_provider_id", "") or ""
+        ).strip(),
+        performance_director_model=str(
+            _get_group_value(config, "performance", "director_model", "") or ""
+        ).strip(),
+        performance_auto_pause_after_rounds=_as_bool(
+            _get_group_value(config, "performance", "auto_pause_after_rounds", True),
+            True,
+        ),
     )

@@ -86,6 +86,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.dialogue_targets["B"].display_name, "千早爱音")
         self.assertEqual(config.dialogue_targets["B"].mention_id, "2855813757")
 
+    def test_performance_config_is_loaded(self) -> None:
+        config = load_config(
+            {
+                "performance": {
+                    "enabled": True,
+                    "default_rounds": 3,
+                    "max_rounds": 8,
+                    "handoff_delay_seconds": 1,
+                    "director_provider_id": "director",
+                    "director_model": "model-a",
+                    "auto_pause_after_rounds": True,
+                }
+            }
+        )
+
+        self.assertTrue(config.performance_enabled)
+        self.assertEqual(config.performance_default_rounds, 3)
+        self.assertEqual(config.performance_max_rounds, 8)
+        self.assertEqual(config.performance_handoff_delay_seconds, 1)
+        self.assertEqual(config.performance_director_provider_id, "director")
+        self.assertEqual(config.performance_director_model, "model-a")
+
 
 class StateManagerTests(unittest.TestCase):
     def test_missing_state_returns_default(self) -> None:
@@ -529,6 +551,157 @@ class DirectorGateTests(unittest.IsolatedAsyncioTestCase):
         text = orchestrator.build_dialogue_handoff_text("B")
         self.assertIn("#对话接力:B", text)
         self.assertNotIn("#对话B", text)
+
+    async def test_performance_start_creates_plan_and_first_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = SceneOrchestratorConfig(
+                mode="director_gate",
+                performance_default_rounds=2,
+                performance_max_rounds=4,
+                dialogue_targets={
+                    "A": SimpleNamespace(
+                        bot_id="default:980999560",
+                        mention_id="980999560",
+                        display_name="若叶睦",
+                    ),
+                    "B": SimpleNamespace(
+                        bot_id="2:2855813757",
+                        mention_id="2855813757",
+                        display_name="千早爱音",
+                    ),
+                },
+            )
+            orchestrator = Orchestrator(SimpleNamespace(), config, Path(temp_dir))
+            orchestrator.llm = FakeLLM(
+                json.dumps(
+                    {
+                        "scene": "睦家门口",
+                        "summary": "邀请爱音到家",
+                        "turns": [
+                            {
+                                "speaker_key": "A",
+                                "target_key": "B",
+                                "beat": "睦简短发出邀请",
+                                "emotion": "平静",
+                                "constraints": "不要替爱音答应",
+                            },
+                            {
+                                "speaker_key": "B",
+                                "target_key": "A",
+                                "beat": "爱音嘴硬但动摇",
+                                "emotion": "慌张",
+                                "constraints": "不要立刻完全接受",
+                            },
+                        ],
+                        "pause_prompt": "等待用户继续指示",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+            result = await orchestrator.handle_performance_command(
+                FakeEvent(
+                    self_id="980999560",
+                    platform_id="default",
+                    group_id="856127739",
+                    text="@若叶睦 #开演 #对话千早爱音 轮次=2 邀请爱音到你家",
+                )
+            )
+
+            self.assertTrue(result["handled"])
+            self.assertEqual(result["handoff"]["mention_id"], "980999560")
+            state = orchestrator.performance_store.load("group:856127739")
+            self.assertTrue(state["active"])
+            self.assertEqual(state["scene"], "睦家门口")
+            self.assertEqual(state["round_limit"], 2)
+            self.assertEqual(state["plan"][0]["speaker_key"], "A")
+
+    async def test_performance_injects_only_current_speaker_beat(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = SceneOrchestratorConfig(mode="director_gate")
+            orchestrator = Orchestrator(SimpleNamespace(), config, Path(temp_dir))
+            orchestrator.performance_store.save(
+                "group:g-1",
+                {
+                    "active": True,
+                    "session_id": "s1",
+                    "scene": "stage",
+                    "round_limit": 1,
+                    "turn_index": 0,
+                    "participants": [
+                        {
+                            "key": "A",
+                            "bot_id": "qq:bot-a",
+                            "mention_id": "bot-a",
+                            "display_name": "A",
+                        }
+                    ],
+                    "plan": [
+                        {
+                            "speaker_key": "A",
+                            "target_key": "A",
+                            "beat": "speak softly",
+                            "emotion": "calm",
+                            "constraints": "stay in character",
+                        }
+                    ],
+                    "transcript": [],
+                },
+            )
+
+            text = orchestrator.build_performance_instruction(FakeEvent(self_id="bot-a"))
+            other = orchestrator.build_performance_instruction(FakeEvent(self_id="bot-b"))
+
+            self.assertIn("<scene_performance_beat>", text)
+            self.assertIn("speak softly", text)
+            self.assertEqual(other, "")
+
+    async def test_performance_response_advances_and_pauses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = SceneOrchestratorConfig(mode="director_gate")
+            orchestrator = Orchestrator(SimpleNamespace(), config, Path(temp_dir))
+            orchestrator.performance_store.save(
+                "group:g-1",
+                {
+                    "active": True,
+                    "session_id": "s1",
+                    "scene": "stage",
+                    "round_limit": 1,
+                    "turn_index": 0,
+                    "participants": [
+                        {
+                            "key": "A",
+                            "bot_id": "qq:bot-a",
+                            "mention_id": "bot-a",
+                            "display_name": "A",
+                        }
+                    ],
+                    "plan": [
+                        {
+                            "speaker_key": "A",
+                            "target_key": "A",
+                            "beat": "speak",
+                            "emotion": "",
+                            "constraints": "",
+                        }
+                    ],
+                    "transcript": [],
+                    "pause_prompt": "pause now",
+                },
+            )
+
+            result = orchestrator.apply_performance_response(
+                FakeEvent(self_id="bot-a"),
+                FakeResponse("visible reply"),
+            )
+            state = orchestrator.performance_store.load("group:g-1")
+
+            self.assertTrue(result["handled"])
+            self.assertTrue(result["finished"])
+            self.assertFalse(state["active"])
+            self.assertTrue(state["waiting_user_instruction"])
+            self.assertEqual(state["transcript"][-1]["text"], "visible reply")
+            self.assertEqual(result["pause_message"], "pause now")
 
     def test_speech_plan_ttl_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

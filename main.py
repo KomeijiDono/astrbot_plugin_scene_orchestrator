@@ -52,6 +52,17 @@ class SceneOrchestratorPlugin(Star):
 
         if self._is_director_gate_enabled():
             gate = await self.orchestrator.director_gate(event)
+            performance_command = await self.orchestrator.handle_performance_command(event)
+            if performance_command and performance_command.get("handled"):
+                message = str(performance_command.get("message") or "")
+                if message:
+                    yield event.plain_result(message)
+                handoff = performance_command.get("handoff")
+                if isinstance(handoff, dict):
+                    asyncio.create_task(self._send_performance_handoff(event, handoff))
+                event.stop_event()
+                return
+
             handoff = self.orchestrator.extract_dialogue_handoff(event)
             if handoff:
                 event.set_extra("scene_orchestrator_dialogue_handoff", handoff)
@@ -99,6 +110,12 @@ class SceneOrchestratorPlugin(Star):
             return
 
         if self._is_director_gate_enabled():
+            context_text = self.orchestrator.build_performance_instruction(event)
+            if context_text:
+                debug_log(logger, self.config.debug_mode, "inject performance beat")
+                self._append_dynamic_context(req, context_text)
+                return
+
             context_text = self.orchestrator.build_director_gate_instruction(event)
             if not context_text:
                 return
@@ -132,6 +149,21 @@ class SceneOrchestratorPlugin(Star):
         response: LLMResponse,
     ) -> None:
         if not self._is_director_gate_enabled() or response is None:
+            return
+
+        performance_result = self.orchestrator.apply_performance_response(event, response)
+        if performance_result.get("handled"):
+            handoff = performance_result.get("handoff")
+            if isinstance(handoff, dict):
+                asyncio.create_task(self._send_performance_handoff(event, handoff))
+            pause_message = str(performance_result.get("pause_message") or "")
+            if pause_message:
+                asyncio.create_task(self._send_plain_later(event, pause_message))
+            debug_log(
+                logger,
+                self.config.debug_mode,
+                f"performance advanced finished={performance_result.get('finished')}",
+            )
             return
 
         result = self.orchestrator.apply_director_response(event, response)
@@ -180,6 +212,35 @@ class SceneOrchestratorPlugin(Star):
             self.config.debug_mode,
             f"sent dialogue handoff target={target_key} mention_id={mention_id}",
         )
+
+    async def _send_performance_handoff(
+        self,
+        event: AstrMessageEvent,
+        handoff: dict[str, Any],
+    ) -> None:
+        delay = max(int(self.config.performance_handoff_delay_seconds), 0)
+        if delay:
+            await asyncio.sleep(delay)
+
+        mention_id = str(handoff.get("mention_id") or "").strip()
+        text = str(handoff.get("text") or "").strip()
+        if not mention_id or not text:
+            return
+        await event.send(event.chain_result([At(qq=mention_id), Plain(text)]))
+        debug_log(
+            logger,
+            self.config.debug_mode,
+            f"sent performance handoff speaker={handoff.get('speaker_key')} "
+            f"mention_id={mention_id}",
+        )
+
+    async def _send_plain_later(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+    ) -> None:
+        await asyncio.sleep(0.2)
+        await event.send(event.chain_result([Plain(text)]))
 
     async def terminate(self) -> None:
         pass

@@ -14,18 +14,14 @@
         "description": "运行模式",
         "type": "string",
         "default": "takeover",
-        "options": [
-          "takeover",
-          "inject",
-          "director_gate"
-        ],
-        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文；director_gate=零额外 LLM 调用的原生剧情状态模式。"
+        "options": ["takeover", "inject", "director_gate"],
+        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文；director_gate=原生 LLM 剧情/分幕演出模式。"
       },
       "debug_mode": {
         "description": "调试日志",
         "type": "bool",
         "default": false,
-        "hint": "开启后输出状态注入、隐藏状态解析和调试信息。"
+        "hint": "开启后输出状态注入、接力和调试信息。"
       }
     }
   },
@@ -45,11 +41,7 @@
         "type": "int",
         "default": 100,
         "hint": "世界状态中最多保留的历史事件数量。",
-        "slider": {
-          "min": 1,
-          "max": 1000,
-          "step": 1
-        }
+        "slider": {"min": 1, "max": 1000, "step": 1}
       }
     }
   },
@@ -62,10 +54,7 @@
         "description": "状态范围",
         "type": "string",
         "default": "origin",
-        "options": [
-          "origin",
-          "global"
-        ],
+        "options": ["origin", "global"],
         "hint": "origin=每个 unified_msg_origin 单独保存；global=所有来源共享。director_gate 群聊按 group_id 共享。"
       }
     }
@@ -73,28 +62,20 @@
   "director": {
     "description": "兼容设置",
     "type": "object",
-    "hint": "保留旧配置字段以兼容已有配置；director_gate 不再生成发言计划。",
+    "hint": "保留旧配置字段以兼容已有配置。",
     "items": {
       "speech_plan_ttl_seconds": {
         "description": "旧发言计划有效期",
         "type": "int",
         "default": 120,
         "hint": "兼容旧版本字段。新 director_gate 模式不会使用该值。",
-        "slider": {
-          "min": 10,
-          "max": 600,
-          "step": 10
-        }
+        "slider": {"min": 10, "max": 600, "step": 10}
       },
       "default_reply_style": {
         "description": "旧默认回复长度",
         "type": "string",
         "default": "normal",
-        "options": [
-          "short",
-          "normal",
-          "long"
-        ],
+        "options": ["short", "normal", "long"],
         "hint": "兼容旧版本字段。新 director_gate 模式不会使用该值。"
       }
     }
@@ -120,25 +101,21 @@
         "description": "最大读取字符数",
         "type": "int",
         "default": 6000,
-        "hint": "限制注入 prompt 的世界观长度，避免提示词过长。",
-        "slider": {
-          "min": 0,
-          "max": 30000,
-          "step": 500
-        }
+        "hint": "限制注入 prompt 的世界观长度。",
+        "slider": {"min": 0, "max": 30000, "step": 500}
       },
       "auto_create": {
         "description": "自动创建模板",
         "type": "bool",
         "default": true,
-        "hint": "世界观文件不存在时自动创建一个可编辑模板。"
+        "hint": "世界观文件不存在时自动创建模板。"
       }
     }
   },
   "dialogue": {
     "description": "对话接力",
     "type": "object",
-    "hint": "启用 #对话X 指令，让被唤醒机器人回复后再 @ 指定机器人接着演绎。",
+    "hint": "兼容旧 #对话X 手动接力。",
     "items": {
       "enabled": {
         "description": "启用对话接力",
@@ -151,35 +128,79 @@
         "type": "int",
         "default": 2,
         "hint": "A 回复后等待多少秒再 @B。",
-        "slider": {
-          "min": 0,
-          "max": 30,
-          "step": 1
-        }
+        "slider": {"min": 0, "max": 30, "step": 1}
       },
       "cooldown_seconds": {
         "description": "接力冷却秒数",
         "type": "int",
         "default": 10,
         "hint": "同一群两次自动接力之间的最小间隔。",
-        "slider": {
-          "min": 0,
-          "max": 300,
-          "step": 5
-        }
+        "slider": {"min": 0, "max": 300, "step": 5}
       },
       "targets": {
         "description": "目标映射",
         "type": "object",
         "default": {},
-        "hint": "键是 #对话 后面的名字，例如 B；值包含 bot_id、mention_id、display_name。示例：{\"B\":{\"bot_id\":\"2:2855813757\",\"mention_id\":\"2855813757\",\"display_name\":\"千早爱音\"}}",
+        "hint": "键是 #对话 后面的名字，例如 B；值包含 bot_id、mention_id、display_name。",
         "items": {}
       },
       "targets_json": {
         "description": "目标映射 JSON",
         "type": "string",
         "default": "",
-        "hint": "如果上面的对象配置被面板清空，请在这里填写 JSON。示例：{\"B\":{\"bot_id\":\"2:2855813757\",\"mention_id\":\"2855813757\",\"display_name\":\"千早爱音\"}}"
+        "hint": "如果上面的对象配置被面板清空，请在这里填写 JSON。"
+      }
+    }
+  },
+  "performance": {
+    "description": "分幕演出",
+    "type": "object",
+    "hint": "用 #开演/#继续 启动专门导演 LLM，按固定轮次自动 @ 角色演出。",
+    "items": {
+      "enabled": {
+        "description": "启用分幕演出",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后识别 #开演、#继续、#暂停、#重开、#剧情。"
+      },
+      "default_rounds": {
+        "description": "默认轮次",
+        "type": "int",
+        "default": 4,
+        "hint": "用户未指定轮次时自动对话多少个角色回合。",
+        "slider": {"min": 1, "max": 20, "step": 1}
+      },
+      "max_rounds": {
+        "description": "最大轮次",
+        "type": "int",
+        "default": 10,
+        "hint": "限制用户指定的最大自动回合数，防止无限接力。",
+        "slider": {"min": 1, "max": 50, "step": 1}
+      },
+      "handoff_delay_seconds": {
+        "description": "演出接力延迟秒数",
+        "type": "int",
+        "default": 2,
+        "hint": "每次角色回复后等待多少秒再 @ 下一位。",
+        "slider": {"min": 0, "max": 30, "step": 1}
+      },
+      "director_provider_id": {
+        "description": "导演 Provider ID",
+        "type": "string",
+        "default": "",
+        "hint": "预留字段。为空时使用当前 AstrBot 默认 provider。"
+      },
+      "director_model": {
+        "description": "导演模型名",
+        "type": "string",
+        "default": "",
+        "hint": "预留字段。为空时使用 provider 默认模型。"
+      },
+      "auto_pause_after_rounds": {
+        "description": "轮次结束后暂停",
+        "type": "bool",
+        "default": true,
+        "hint": "达到轮次后停止自动 @，等待用户用 #继续 给新指示。"
       }
     }
   },
@@ -192,7 +213,7 @@
         "description": "继承 AstrBot 人格",
         "type": "bool",
         "default": true,
-        "hint": "开启后，takeover 模式会注入当前会话机器人的 AstrBot 人格设定。"
+        "hint": "开启后 takeover 模式会注入当前会话机器人的 AstrBot 人格设定。"
       },
       "debug_persona_resolution": {
         "description": "人格解析日志",
@@ -205,13 +226,13 @@
   "llm": {
     "description": "LLM 设置",
     "type": "object",
-    "hint": "控制 takeover 模式的导演决策解析策略。",
+    "hint": "控制 JSON 解析策略。",
     "items": {
       "strict_json": {
         "description": "严格 JSON",
         "type": "bool",
         "default": true,
-        "hint": "开启后 takeover 导演输出无法解析为 JSON 时使用安全回退决策。"
+        "hint": "开启后导演输出无法解析为 JSON 时使用安全回退策略。"
       }
     }
   },
