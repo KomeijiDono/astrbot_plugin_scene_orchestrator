@@ -11,6 +11,15 @@ class SceneOrchestratorConfig:
     max_events: int = 100
     strict_json: bool = True
     default_role: str = "anon_default"
+    state_scope: str = "origin"
+    inherit_astrbot_persona: bool = True
+    debug_persona_resolution: bool = False
+    speech_plan_ttl_seconds: int = 120
+    default_reply_style: str = "normal"
+    worldbook_enabled: bool = True
+    worldbook_path: str = "data/worldbook.md"
+    worldbook_max_chars: int = 6000
+    worldbook_auto_create: bool = True
 
 
 def _get_group_value(
@@ -64,7 +73,7 @@ def _as_int(value: Any, default: int, minimum: int | None = None) -> int:
 def load_config(config: Any) -> SceneOrchestratorConfig:
     mode = str(_get_group_value(config, "general", "mode", "takeover") or "takeover")
     mode = mode.strip().lower()
-    if mode not in {"takeover", "inject"}:
+    if mode not in {"takeover", "inject", "director_gate"}:
         mode = "takeover"
 
     default_role = str(
@@ -93,4 +102,44 @@ def load_config(config: Any) -> SceneOrchestratorConfig:
             True,
         ),
         default_role=default_role,
+        state_scope=str(
+            _get_group_value(config, "state", "scope", "origin") or "origin"
+        ).strip().lower()
+        or "origin",
+        inherit_astrbot_persona=_as_bool(
+            _get_group_value(config, "persona", "inherit_astrbot_persona", True),
+            True,
+        ),
+        debug_persona_resolution=_as_bool(
+            _get_group_value(config, "persona", "debug_persona_resolution", False),
+            False,
+        ),
+        speech_plan_ttl_seconds=_as_int(
+            _get_group_value(config, "director", "speech_plan_ttl_seconds", 120),
+            120,
+            minimum=1,
+        ),
+        default_reply_style=str(
+            _get_group_value(config, "director", "default_reply_style", "normal")
+            or "normal"
+        ).strip().lower()
+        or "normal",
+        worldbook_enabled=_as_bool(
+            _get_group_value(config, "worldbook", "enabled", True),
+            True,
+        ),
+        worldbook_path=str(
+            _get_group_value(config, "worldbook", "path", "data/worldbook.md")
+            or "data/worldbook.md"
+        ).strip()
+        or "data/worldbook.md",
+        worldbook_max_chars=_as_int(
+            _get_group_value(config, "worldbook", "max_chars", 6000),
+            6000,
+            minimum=0,
+        ),
+        worldbook_auto_create=_as_bool(
+            _get_group_value(config, "worldbook", "auto_create", True),
+            True,
+        ),
     )

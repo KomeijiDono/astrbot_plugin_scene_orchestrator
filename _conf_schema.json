@@ -16,9 +16,10 @@
         "default": "takeover",
         "options": [
           "takeover",
-          "inject"
+          "inject",
+          "director_gate"
         ],
-        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文。"
+        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文；director_gate=多机器人主导演门控，推荐用于多个适配器实例。"
       },
       "debug_mode": {
         "description": "调试日志",
@@ -49,6 +50,107 @@
           "max": 1000,
           "step": 1
         }
+      }
+    }
+  },
+  "state": {
+    "description": "状态隔离",
+    "type": "object",
+    "hint": "控制导演插件的世界状态隔离粒度。",
+    "items": {
+      "scope": {
+        "description": "状态范围",
+        "type": "string",
+        "default": "origin",
+        "options": [
+          "origin",
+          "global"
+        ],
+        "hint": "origin=每个 unified_msg_origin 单独保存剧情状态；global=所有来源共享状态。"
+      }
+    }
+  },
+  "director": {
+    "description": "主导演设置",
+    "type": "object",
+    "hint": "控制 director_gate 模式的发言计划和回复风格。",
+    "items": {
+      "speech_plan_ttl_seconds": {
+        "description": "发言计划有效期",
+        "type": "int",
+        "default": 120,
+        "hint": "同一条消息的导演发言计划保留多少秒，避免多个机器人重复生成计划。",
+        "slider": {
+          "min": 10,
+          "max": 600,
+          "step": 10
+        }
+      },
+      "default_reply_style": {
+        "description": "默认回复长度",
+        "type": "string",
+        "default": "normal",
+        "options": [
+          "short",
+          "normal",
+          "long"
+        ],
+        "hint": "导演没有指定回复长度时使用的默认值。"
+      }
+    }
+  },
+  "worldbook": {
+    "description": "世界观",
+    "type": "object",
+    "hint": "用户可编辑的全局世界观，供导演生成发言计划时参考。最终回复仍走 AstrBot 原生人格和知识库链路。",
+    "items": {
+      "enabled": {
+        "description": "启用世界观",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后导演会读取 worldbook 文件作为角色扮演背景。"
+      },
+      "path": {
+        "description": "世界观文件路径",
+        "type": "string",
+        "default": "data/worldbook.md",
+        "hint": "相对路径基于插件目录；也可以填写绝对路径。"
+      },
+      "max_chars": {
+        "description": "最大读取字符数",
+        "type": "int",
+        "default": 6000,
+        "hint": "限制注入导演 prompt 的世界观长度，避免提示词过长。",
+        "slider": {
+          "min": 0,
+          "max": 30000,
+          "step": 500
+        }
+      },
+      "auto_create": {
+        "description": "自动创建模板",
+        "type": "bool",
+        "default": true,
+        "hint": "世界观文件不存在时自动创建一个可编辑模板。"
+      }
+    }
+  },
+  "persona": {
+    "description": "人格继承",
+    "type": "object",
+    "hint": "控制 takeover 模式是否继承 AstrBot 当前会话人格。",
+    "items": {
+      "inherit_astrbot_persona": {
+        "description": "继承 AstrBot 人格",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，导演决策和角色回复会注入当前会话/机器人的 AstrBot 人格设定。"
+      },
+      "debug_persona_resolution": {
+        "description": "人格解析日志",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后输出当前消息解析到的人格来源和人格 ID。"
       }
     }
   },

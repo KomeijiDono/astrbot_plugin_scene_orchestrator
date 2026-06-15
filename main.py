@@ -36,21 +36,44 @@ class SceneOrchestratorPlugin(Star):
     def _is_inject_enabled(self) -> bool:
         return self.config.enabled and self.config.mode == "inject"
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    def _is_director_gate_enabled(self) -> bool:
+        return self.config.enabled and self.config.mode == "director_gate"
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=9999)
     async def on_message(self, event: AstrMessageEvent):
-        if not self._is_takeover_enabled():
+        if not (self._is_takeover_enabled() or self._is_director_gate_enabled()):
             return
 
         message = str(getattr(event, "message_str", "") or "").strip()
         if not message or message.startswith("/"):
             return
 
+        if self._is_director_gate_enabled():
+            gate = await self.orchestrator.director_gate(event)
+            debug_log(
+                logger,
+                self.config.debug_mode,
+                f"director_gate allow={gate.get('allow_reply')} "
+                f"bot={gate.get('bot_id')} created={gate.get('created')} "
+                f"message_key={gate.get('message_key')} plan={gate.get('plan')}",
+            )
+            if not gate.get("allow_reply"):
+                event.stop_event()
+            return
+
         result = await self.orchestrator.process(event)
         decision = result.get("decision", {})
+        persona = result.get("persona")
         debug_log(
             logger,
             self.config.debug_mode,
             f"takeover decision={decision}",
+        )
+        debug_log(
+            logger,
+            self.config.debug_persona_resolution,
+            f"persona source={getattr(persona, 'source', 'none')} "
+            f"id={getattr(persona, 'persona_id', '')}",
         )
 
         if result.get("should_reply"):
@@ -63,11 +86,17 @@ class SceneOrchestratorPlugin(Star):
         event: AstrMessageEvent,
         req: ProviderRequest,
     ) -> None:
-        if not self._is_inject_enabled():
+        if not (self._is_inject_enabled() or self._is_director_gate_enabled()):
             return
 
-        context_text = self.orchestrator.build_inject_context()
-        debug_log(logger, self.config.debug_mode, "inject scene context into LLM request")
+        if self._is_director_gate_enabled():
+            context_text = await self.orchestrator.build_director_gate_instruction(event)
+            if not context_text:
+                return
+            debug_log(logger, self.config.debug_mode, "inject director gate instruction")
+        else:
+            context_text = self.orchestrator.build_inject_context(event)
+            debug_log(logger, self.config.debug_mode, "inject scene context into LLM request")
         self._append_dynamic_context(req, context_text)
 
     def _append_dynamic_context(self, req: ProviderRequest, text: str) -> None:
