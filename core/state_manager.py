@@ -24,6 +24,7 @@ class StateManager:
         state.setdefault("events", [])
         state.setdefault("mood", {})
         state.setdefault("current_speaker", "")
+        state.setdefault("next_direction", "")
 
         if not isinstance(state["events"], list):
             state["events"] = []
@@ -36,6 +37,9 @@ class StateManager:
         state = self.load()
         state["scene"] = event.get("scene") or state.get("scene") or "default"
         state["current_speaker"] = event.get("speaker") or state.get("current_speaker") or ""
+        state["next_direction"] = (
+            event.get("next_direction") or state.get("next_direction") or ""
+        )
 
         emotion = event.get("emotion")
         speaker = event.get("speaker")
@@ -58,4 +62,5 @@ class StateManager:
             "events": [],
             "mood": {},
             "current_speaker": "",
+            "next_direction": "",
         }

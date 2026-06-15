@@ -1,14 +1,16 @@
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.message.components import At, Plain
 
 from .config import load_config
 from .core.orchestrator import Orchestrator
-from .utils.logger import PLUGIN_NAME, debug_log, warning_log
+from .utils.logger import PLUGIN_NAME, debug_log, info_log, warning_log
 
 try:
     from astrbot.core.agent.message import TextPart
@@ -50,15 +52,22 @@ class SceneOrchestratorPlugin(Star):
 
         if self._is_director_gate_enabled():
             gate = await self.orchestrator.director_gate(event)
-            debug_log(
+            handoff = self.orchestrator.extract_dialogue_handoff(event)
+            if handoff:
+                event.set_extra("scene_orchestrator_dialogue_handoff", handoff)
+                if not handoff.get("ok"):
+                    warning_log(
+                        logger,
+                        f"unknown dialogue handoff target: {handoff.get('target_key')} "
+                        f"known_targets={handoff.get('known_targets')}",
+                    )
+            info_log(
                 logger,
                 self.config.debug_mode,
-                f"director_gate allow={gate.get('allow_reply')} "
-                f"bot={gate.get('bot_id')} created={gate.get('created')} "
-                f"message_key={gate.get('message_key')} plan={gate.get('plan')}",
+                f"director_gate native mode bot_id={gate.get('bot_id')} "
+                f"scene_key={gate.get('scene_key')} "
+                f"handoff={handoff.get('target_key') if handoff else ''}",
             )
-            if not gate.get("allow_reply"):
-                event.stop_event()
             return
 
         result = await self.orchestrator.process(event)
@@ -90,10 +99,10 @@ class SceneOrchestratorPlugin(Star):
             return
 
         if self._is_director_gate_enabled():
-            context_text = await self.orchestrator.build_director_gate_instruction(event)
+            context_text = self.orchestrator.build_director_gate_instruction(event)
             if not context_text:
                 return
-            debug_log(logger, self.config.debug_mode, "inject director gate instruction")
+            debug_log(logger, self.config.debug_mode, "inject native director context")
         else:
             context_text = self.orchestrator.build_inject_context(event)
             debug_log(logger, self.config.debug_mode, "inject scene context into LLM request")
@@ -115,6 +124,62 @@ class SceneOrchestratorPlugin(Star):
                 "extra_user_content_parts is unavailable; appending scene context to system_prompt",
             )
             req.system_prompt = f"{getattr(req, 'system_prompt', '')}\n\n{text}"
+
+    @filter.on_llm_response()
+    async def on_llm_response(
+        self,
+        event: AstrMessageEvent,
+        response: LLMResponse,
+    ) -> None:
+        if not self._is_director_gate_enabled() or response is None:
+            return
+
+        result = self.orchestrator.apply_director_response(event, response)
+        if result.get("error"):
+            warning_log(
+                logger,
+                f"failed to parse scene director state: {result.get('error')}",
+            )
+        elif result.get("found"):
+            debug_log(
+                logger,
+                self.config.debug_mode,
+                f"saved scene director state no_reply={result.get('no_reply')}",
+            )
+        if result.get("no_reply"):
+            return
+
+        handoff = event.get_extra("scene_orchestrator_dialogue_handoff", None)
+        if not isinstance(handoff, dict) or not handoff.get("ok"):
+            return
+        scene_key = str(handoff.get("scene_key") or "")
+        if not self.orchestrator.can_send_dialogue_handoff(scene_key):
+            debug_log(logger, self.config.debug_mode, "skip dialogue handoff due to cooldown")
+            return
+        asyncio.create_task(self._send_dialogue_handoff(event, handoff))
+
+    async def _send_dialogue_handoff(
+        self,
+        event: AstrMessageEvent,
+        handoff: dict[str, Any],
+    ) -> None:
+        delay = max(int(self.config.dialogue_handoff_delay_seconds), 0)
+        if delay:
+            await asyncio.sleep(delay)
+
+        target = handoff.get("target")
+        mention_id = str(getattr(target, "mention_id", "") or "").strip()
+        if not mention_id:
+            return
+
+        target_key = str(handoff.get("target_key") or "")
+        text = self.orchestrator.build_dialogue_handoff_text(target_key)
+        await event.send(event.chain_result([At(qq=mention_id), Plain(text)]))
+        debug_log(
+            logger,
+            self.config.debug_mode,
+            f"sent dialogue handoff target={target_key} mention_id={mention_id}",
+        )
 
     async def terminate(self) -> None:
         pass

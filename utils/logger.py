@@ -9,5 +9,10 @@ def debug_log(logger: Any, enabled: bool, message: str) -> None:
         logger.debug(f"[{PLUGIN_NAME}] {message}")
 
 
+def info_log(logger: Any, enabled: bool, message: str) -> None:
+    if enabled:
+        logger.info(f"[{PLUGIN_NAME}] {message}")
+
+
 def warning_log(logger: Any, message: str) -> None:
     logger.warning(f"[{PLUGIN_NAME}] {message}")

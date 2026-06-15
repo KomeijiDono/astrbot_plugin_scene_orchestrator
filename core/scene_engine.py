@@ -3,7 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 
-DECISION_FIELDS = ("scene", "speaker", "emotion", "intent", "world_event", "focus")
+DECISION_FIELDS = (
+    "scene",
+    "speaker",
+    "emotion",
+    "intent",
+    "world_event",
+    "next_direction",
+    "focus",
+)
 
 
 class SceneEngine:
@@ -27,6 +35,8 @@ class SceneEngine:
             normalized["intent"] = "respond"
         if not normalized["world_event"]:
             normalized["world_event"] = user_input[:200]
+        if not normalized["next_direction"]:
+            normalized["next_direction"] = str(state.get("next_direction") or "").strip()
 
         normalized["auto_scene"] = self.enable_auto_scene
         return normalized
@@ -41,6 +51,7 @@ class SceneEngine:
             "<scene_orchestrator_context>",
             f"scene: {state.get('scene', 'default')}",
             f"current_speaker: {state.get('current_speaker', '')}",
+            f"next_direction: {state.get('next_direction', '')}",
             f"mood: {state.get('mood', {})}",
             "recent_events:",
         ]
@@ -51,7 +62,15 @@ class SceneEngine:
                     + "; ".join(
                         f"{key}={value}"
                         for key, value in item.items()
-                        if key in {"scene", "speaker", "emotion", "intent", "world_event"}
+                        if key
+                        in {
+                            "scene",
+                            "speaker",
+                            "emotion",
+                            "intent",
+                            "world_event",
+                            "next_direction",
+                        }
                     )
                 )
             else:

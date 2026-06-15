@@ -77,7 +77,7 @@ def scene_key_for_event(event: Any) -> str:
     platform = event_platform_id(event) or "platform"
     group_id = event_group_id(event)
     if group_id:
-        return f"group:{platform}:{group_id}"
+        return f"group:{group_id}"
 
     self_id = event_self_id(event) or "bot"
     sender_id = event_sender_id(event) or "sender"

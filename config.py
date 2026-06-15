@@ -1,5 +1,13 @@
+import json
 from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class DialogueTarget:
+    bot_id: str = ""
+    mention_id: str = ""
+    display_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -20,6 +28,10 @@ class SceneOrchestratorConfig:
     worldbook_path: str = "data/worldbook.md"
     worldbook_max_chars: int = 6000
     worldbook_auto_create: bool = True
+    dialogue_enabled: bool = False
+    dialogue_handoff_delay_seconds: int = 2
+    dialogue_cooldown_seconds: int = 10
+    dialogue_targets: dict[str, DialogueTarget] | None = None
 
 
 def _get_group_value(
@@ -70,6 +82,35 @@ def _as_int(value: Any, default: int, minimum: int | None = None) -> int:
     return number
 
 
+def _as_dialogue_targets(value: Any) -> dict[str, DialogueTarget]:
+    if not isinstance(value, dict):
+        return {}
+
+    targets: dict[str, DialogueTarget] = {}
+    for raw_key, raw_target in value.items():
+        key = str(raw_key or "").strip()
+        if not key or not isinstance(raw_target, dict):
+            continue
+        target = DialogueTarget(
+            bot_id=str(raw_target.get("bot_id") or "").strip(),
+            mention_id=str(raw_target.get("mention_id") or "").strip(),
+            display_name=str(raw_target.get("display_name") or "").strip(),
+        )
+        if target.mention_id:
+            targets[key] = target
+    return targets
+
+
+def _as_json_dialogue_targets(value: Any) -> dict[str, DialogueTarget]:
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return _as_dialogue_targets(parsed)
+
+
 def load_config(config: Any) -> SceneOrchestratorConfig:
     mode = str(_get_group_value(config, "general", "mode", "takeover") or "takeover")
     mode = mode.strip().lower()
@@ -79,6 +120,15 @@ def load_config(config: Any) -> SceneOrchestratorConfig:
     default_role = str(
         _get_group_value(config, "roles", "default_role", "anon_default")
         or "anon_default"
+    )
+
+    dialogue_targets = _as_dialogue_targets(
+        _get_group_value(config, "dialogue", "targets", {})
+    )
+    dialogue_targets.update(
+        _as_json_dialogue_targets(
+            _get_group_value(config, "dialogue", "targets_json", "")
+        )
     )
 
     return SceneOrchestratorConfig(
@@ -142,4 +192,19 @@ def load_config(config: Any) -> SceneOrchestratorConfig:
             _get_group_value(config, "worldbook", "auto_create", True),
             True,
         ),
+        dialogue_enabled=_as_bool(
+            _get_group_value(config, "dialogue", "enabled", False),
+            False,
+        ),
+        dialogue_handoff_delay_seconds=_as_int(
+            _get_group_value(config, "dialogue", "handoff_delay_seconds", 2),
+            2,
+            minimum=0,
+        ),
+        dialogue_cooldown_seconds=_as_int(
+            _get_group_value(config, "dialogue", "cooldown_seconds", 10),
+            10,
+            minimum=0,
+        ),
+        dialogue_targets=dialogue_targets,
     )

@@ -2,13 +2,13 @@
   "general": {
     "description": "基础设置",
     "type": "object",
-    "hint": "控制导演插件是否启用以及使用接管回复还是注入上下文模式。",
+    "hint": "控制插件是否启用以及运行模式。",
     "items": {
       "enabled": {
         "description": "启用",
         "type": "bool",
         "default": true,
-        "hint": "关闭后插件不会接管消息，也不会注入场景上下文。"
+        "hint": "关闭后插件不接管消息，也不注入场景上下文。"
       },
       "mode": {
         "description": "运行模式",
@@ -19,13 +19,13 @@
           "inject",
           "director_gate"
         ],
-        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文；director_gate=多机器人主导演门控，推荐用于多个适配器实例。"
+        "hint": "takeover=插件生成并发送角色回复；inject=只向原生 LLM 请求追加场景上下文；director_gate=零额外 LLM 调用的原生剧情状态模式。"
       },
       "debug_mode": {
         "description": "调试日志",
         "type": "bool",
         "default": false,
-        "hint": "开启后输出导演决策和注入动作日志。"
+        "hint": "开启后输出状态注入、隐藏状态解析和调试信息。"
       }
     }
   },
@@ -38,7 +38,7 @@
         "description": "自动推进场景",
         "type": "bool",
         "default": true,
-        "hint": "允许导演根据用户输入推进剧情场景。"
+        "hint": "允许导演状态根据对话推进剧情场景。"
       },
       "max_events": {
         "description": "最大事件数",
@@ -56,7 +56,7 @@
   "state": {
     "description": "状态隔离",
     "type": "object",
-    "hint": "控制导演插件的世界状态隔离粒度。",
+    "hint": "控制世界状态隔离粒度。",
     "items": {
       "scope": {
         "description": "状态范围",
@@ -66,20 +66,20 @@
           "origin",
           "global"
         ],
-        "hint": "origin=每个 unified_msg_origin 单独保存剧情状态；global=所有来源共享状态。"
+        "hint": "origin=每个 unified_msg_origin 单独保存；global=所有来源共享。director_gate 群聊按 group_id 共享。"
       }
     }
   },
   "director": {
-    "description": "主导演设置",
+    "description": "兼容设置",
     "type": "object",
-    "hint": "控制 director_gate 模式的发言计划和回复风格。",
+    "hint": "保留旧配置字段以兼容已有配置；director_gate 不再生成发言计划。",
     "items": {
       "speech_plan_ttl_seconds": {
-        "description": "发言计划有效期",
+        "description": "旧发言计划有效期",
         "type": "int",
         "default": 120,
-        "hint": "同一条消息的导演发言计划保留多少秒，避免多个机器人重复生成计划。",
+        "hint": "兼容旧版本字段。新 director_gate 模式不会使用该值。",
         "slider": {
           "min": 10,
           "max": 600,
@@ -87,7 +87,7 @@
         }
       },
       "default_reply_style": {
-        "description": "默认回复长度",
+        "description": "旧默认回复长度",
         "type": "string",
         "default": "normal",
         "options": [
@@ -95,20 +95,20 @@
           "normal",
           "long"
         ],
-        "hint": "导演没有指定回复长度时使用的默认值。"
+        "hint": "兼容旧版本字段。新 director_gate 模式不会使用该值。"
       }
     }
   },
   "worldbook": {
     "description": "世界观",
     "type": "object",
-    "hint": "用户可编辑的全局世界观，供导演生成发言计划时参考。最终回复仍走 AstrBot 原生人格和知识库链路。",
+    "hint": "用户可编辑的全局世界观，会注入原生 AstrBot LLM 请求。",
     "items": {
       "enabled": {
         "description": "启用世界观",
         "type": "bool",
         "default": true,
-        "hint": "开启后导演会读取 worldbook 文件作为角色扮演背景。"
+        "hint": "开启后读取 worldbook 文件作为剧情背景。"
       },
       "path": {
         "description": "世界观文件路径",
@@ -120,7 +120,7 @@
         "description": "最大读取字符数",
         "type": "int",
         "default": 6000,
-        "hint": "限制注入导演 prompt 的世界观长度，避免提示词过长。",
+        "hint": "限制注入 prompt 的世界观长度，避免提示词过长。",
         "slider": {
           "min": 0,
           "max": 30000,
@@ -135,6 +135,54 @@
       }
     }
   },
+  "dialogue": {
+    "description": "对话接力",
+    "type": "object",
+    "hint": "启用 #对话X 指令，让被唤醒机器人回复后再 @ 指定机器人接着演绎。",
+    "items": {
+      "enabled": {
+        "description": "启用对话接力",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后识别类似 @机器人A #对话B 的消息。"
+      },
+      "handoff_delay_seconds": {
+        "description": "接力延迟秒数",
+        "type": "int",
+        "default": 2,
+        "hint": "A 回复后等待多少秒再 @B。",
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        }
+      },
+      "cooldown_seconds": {
+        "description": "接力冷却秒数",
+        "type": "int",
+        "default": 10,
+        "hint": "同一群两次自动接力之间的最小间隔。",
+        "slider": {
+          "min": 0,
+          "max": 300,
+          "step": 5
+        }
+      },
+      "targets": {
+        "description": "目标映射",
+        "type": "object",
+        "default": {},
+        "hint": "键是 #对话 后面的名字，例如 B；值包含 bot_id、mention_id、display_name。示例：{\"B\":{\"bot_id\":\"2:2855813757\",\"mention_id\":\"2855813757\",\"display_name\":\"千早爱音\"}}",
+        "items": {}
+      },
+      "targets_json": {
+        "description": "目标映射 JSON",
+        "type": "string",
+        "default": "",
+        "hint": "如果上面的对象配置被面板清空，请在这里填写 JSON。示例：{\"B\":{\"bot_id\":\"2:2855813757\",\"mention_id\":\"2855813757\",\"display_name\":\"千早爱音\"}}"
+      }
+    }
+  },
   "persona": {
     "description": "人格继承",
     "type": "object",
@@ -144,7 +192,7 @@
         "description": "继承 AstrBot 人格",
         "type": "bool",
         "default": true,
-        "hint": "开启后，导演决策和角色回复会注入当前会话/机器人的 AstrBot 人格设定。"
+        "hint": "开启后，takeover 模式会注入当前会话机器人的 AstrBot 人格设定。"
       },
       "debug_persona_resolution": {
         "description": "人格解析日志",
@@ -157,20 +205,20 @@
   "llm": {
     "description": "LLM 设置",
     "type": "object",
-    "hint": "控制导演决策解析策略。",
+    "hint": "控制 takeover 模式的导演决策解析策略。",
     "items": {
       "strict_json": {
         "description": "严格 JSON",
         "type": "bool",
         "default": true,
-        "hint": "开启后导演输出无法解析为 JSON 时会使用安全回退决策。"
+        "hint": "开启后 takeover 导演输出无法解析为 JSON 时使用安全回退决策。"
       }
     }
   },
   "roles": {
     "description": "角色设置",
     "type": "object",
-    "hint": "控制角色选择的默认值。",
+    "hint": "控制 takeover 模式角色选择的默认值。",
     "items": {
       "default_role": {
         "description": "默认角色",

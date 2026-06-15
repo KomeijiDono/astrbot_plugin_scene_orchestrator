@@ -41,6 +41,51 @@ class ConfigTests(unittest.TestCase):
         config = load_config({"general": {"mode": "director_gate"}})
         self.assertEqual(config.mode, "director_gate")
 
+    def test_dialogue_targets_are_loaded(self) -> None:
+        config = load_config(
+            {
+                "dialogue": {
+                    "enabled": True,
+                    "handoff_delay_seconds": 3,
+                    "cooldown_seconds": 12,
+                    "targets": {
+                        "B": {
+                            "bot_id": "2:2855813757",
+                            "mention_id": "2855813757",
+                            "display_name": "千早爱音",
+                        }
+                    },
+                }
+            }
+        )
+
+        self.assertTrue(config.dialogue_enabled)
+        self.assertEqual(config.dialogue_handoff_delay_seconds, 3)
+        self.assertEqual(config.dialogue_cooldown_seconds, 12)
+        self.assertEqual(config.dialogue_targets["B"].mention_id, "2855813757")
+
+    def test_dialogue_targets_json_is_loaded(self) -> None:
+        config = load_config(
+            {
+                "dialogue": {
+                    "targets": {},
+                    "targets_json": json.dumps(
+                        {
+                            "B": {
+                                "bot_id": "2:2855813757",
+                                "mention_id": "2855813757",
+                                "display_name": "千早爱音",
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            }
+        )
+
+        self.assertEqual(config.dialogue_targets["B"].display_name, "千早爱音")
+        self.assertEqual(config.dialogue_targets["B"].mention_id, "2855813757")
+
 
 class StateManagerTests(unittest.TestCase):
     def test_missing_state_returns_default(self) -> None:
@@ -237,6 +282,7 @@ class FakeEvent:
         self._group_id = group_id
         self._sender_id = sender_id
         self._platform_id = platform_id
+        self.stopped = False
 
     def get_platform_id(self) -> str:
         return self._platform_id
@@ -253,6 +299,9 @@ class FakeEvent:
     def get_message_id(self) -> str:
         return self._message_id
 
+    def stop_event(self) -> None:
+        self.stopped = True
+
 
 class FakeLLM:
     def __init__(self, text: str) -> None:
@@ -266,76 +315,220 @@ class FakeLLM:
         return self.text
 
 
+class FakeResponse:
+    def __init__(self, text: str, result_chain: SimpleNamespace | None = None) -> None:
+        self._completion_text = text
+        self.result_chain = result_chain
+
+    @property
+    def completion_text(self) -> str:
+        return self._completion_text
+
+    @completion_text.setter
+    def completion_text(self, value: str) -> None:
+        self._completion_text = value
+
+
 class DirectorGateTests(unittest.IsolatedAsyncioTestCase):
     def _plugin_dir(self, temp_dir: str) -> Path:
         root = Path(temp_dir)
-        prompt_dir = root / "prompts"
-        prompt_dir.mkdir(parents=True)
-        (prompt_dir / "speech_plan_prompt.txt").write_text("plan prompt", encoding="utf-8")
         return root
 
     def test_same_group_message_key_across_bots(self) -> None:
-        first = FakeEvent(self_id="bot-a", message_id="same-message")
-        second = FakeEvent(self_id="bot-b", message_id="same-message")
+        first = FakeEvent(
+            self_id="980999560",
+            message_id="same-message",
+            group_id="856127739",
+            platform_id="default",
+        )
+        second = FakeEvent(
+            self_id="2855813757",
+            message_id="same-message",
+            group_id="856127739",
+            platform_id="2",
+        )
 
+        self.assertEqual(scene_key_for_event(first), "group:856127739")
         self.assertEqual(scene_key_for_event(first), scene_key_for_event(second))
         self.assertEqual(message_key_for_event(first), message_key_for_event(second))
         self.assertNotEqual(bot_id_for_event(first), bot_id_for_event(second))
 
-    async def test_first_bot_creates_plan_second_bot_reuses_it(self) -> None:
+    async def test_director_gate_does_not_call_extra_llm_or_wake(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             plugin_dir = self._plugin_dir(temp_dir)
             config = SceneOrchestratorConfig(mode="director_gate")
             orchestrator = Orchestrator(SimpleNamespace(), config, plugin_dir)
-            orchestrator.llm = FakeLLM(
-                json.dumps(
-                    {
-                        "scene": "test scene",
-                        "world_event": "user greets the room",
-                        "speakers": ["qq:bot-a"],
-                        "silent": ["qq:bot-b"],
-                        "reply_style": "short",
-                        "emotion": "calm",
-                        "intent": "answer briefly",
-                    }
-                )
+            orchestrator.llm = FakeLLM("should not be called")
+
+            event = FakeEvent(self_id="bot-a")
+            gate = await orchestrator.director_gate(event)
+
+            self.assertIsNone(gate["allow_reply"])
+            self.assertEqual(orchestrator.llm.calls, 0)
+            self.assertFalse(hasattr(event, "is_wake"))
+            self.assertFalse(hasattr(event, "is_at_or_wake_command"))
+            self.assertFalse(event.stopped)
+
+    async def test_director_gate_context_uses_shared_group_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin_dir = self._plugin_dir(temp_dir)
+            config = SceneOrchestratorConfig(mode="director_gate")
+            orchestrator = Orchestrator(SimpleNamespace(), config, plugin_dir)
+            event = FakeEvent(self_id="bot-a", group_id="856127739")
+            orchestrator.apply_director_response(
+                event,
+                FakeResponse(
+                    'visible\n<scene_director_state>{"scene":"stage","speaker":"bot-a",'
+                    '"emotion":"calm","intent":"reply","world_event":"event",'
+                    '"next_direction":"continue","focus":"focus"}</scene_director_state>'
+                ),
             )
 
-            first = FakeEvent(self_id="bot-a", message_id="same-message")
-            second = FakeEvent(self_id="bot-b", message_id="same-message")
-            first_gate = await orchestrator.director_gate(first)
-            second_gate = await orchestrator.director_gate(second)
+            instruction = orchestrator.build_director_gate_instruction(
+                FakeEvent(self_id="bot-b", group_id="856127739", platform_id="2")
+            )
 
-            self.assertTrue(first_gate["created"])
-            self.assertFalse(second_gate["created"])
-            self.assertTrue(first_gate["allow_reply"])
-            self.assertFalse(second_gate["allow_reply"])
-            self.assertEqual(orchestrator.llm.calls, 1)
+            self.assertIn("scene_key: group:856127739", instruction)
+            self.assertIn("scene: stage", instruction)
+            self.assertIn("next_direction: continue", instruction)
+            self.assertIn("unrelated to the roleplay", instruction)
+            self.assertIn("Preserve the current scene and next_direction", instruction)
+            self.assertIn("Do not put exact future dialogue", instruction)
+            self.assertIn("director note for the next turn", instruction)
+            self.assertIn("<scene_director_state>", instruction)
+            self.assertIn("NO_REPLY", instruction)
 
-    async def test_selected_bot_gets_director_instruction(self) -> None:
+    async def test_director_response_updates_state_and_removes_hidden_block(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             plugin_dir = self._plugin_dir(temp_dir)
             config = SceneOrchestratorConfig(mode="director_gate")
             orchestrator = Orchestrator(SimpleNamespace(), config, plugin_dir)
             event = FakeEvent(self_id="bot-a")
-            message_key = message_key_for_event(event)
-            orchestrator.plan_store.save(
-                message_key,
-                {
-                    "scene": "test",
-                    "world_event": "event",
-                    "speakers": ["qq:bot-a"],
-                    "silent": [],
-                    "reply_style": "long",
-                    "emotion": "curious",
-                    "intent": "ask a follow-up",
-                },
+            response = FakeResponse(
+                'hello\n<scene_director_state>{"scene":"stage","speaker":"bot-a",'
+                '"emotion":"happy","intent":"greet","world_event":"bot greeted",'
+                '"next_direction":"ask user","focus":"intro"}</scene_director_state>'
             )
 
-            instruction = await orchestrator.build_director_gate_instruction(event)
+            result = orchestrator.apply_director_response(event, response)
+            state = orchestrator._state_manager_for_scene_key(scene_key_for_event(event)).load()
 
-            self.assertIn("selected by the scene director", instruction)
-            self.assertIn("reply_style: long", instruction)
+            self.assertTrue(result["found"])
+            self.assertEqual(response.completion_text, "hello")
+            self.assertEqual(state["scene"], "stage")
+            self.assertEqual(state["current_speaker"], "bot-a")
+            self.assertEqual(state["next_direction"], "ask user")
+            self.assertEqual(state["events"][-1]["focus"], "intro")
+
+    async def test_no_reply_clears_visible_response_but_saves_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin_dir = self._plugin_dir(temp_dir)
+            config = SceneOrchestratorConfig(mode="director_gate")
+            orchestrator = Orchestrator(SimpleNamespace(), config, plugin_dir)
+            event = FakeEvent(self_id="bot-a")
+            chain = SimpleNamespace(chain=["plain"])
+            response = FakeResponse(
+                'NO_REPLY\n<scene_director_state>{"scene":"silent","speaker":"bot-a",'
+                '"emotion":"neutral","intent":"stay silent","world_event":"listened",'
+                '"next_direction":"wait","focus":"silence"}</scene_director_state>',
+                result_chain=chain,
+            )
+
+            result = orchestrator.apply_director_response(event, response)
+            state = orchestrator._state_manager_for_scene_key(scene_key_for_event(event)).load()
+
+            self.assertTrue(result["no_reply"])
+            self.assertEqual(response.completion_text, "")
+            self.assertEqual(chain.chain, [])
+            self.assertEqual(state["scene"], "silent")
+            self.assertEqual(state["next_direction"], "wait")
+
+    async def test_malformed_director_json_does_not_block_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plugin_dir = self._plugin_dir(temp_dir)
+            config = SceneOrchestratorConfig(mode="director_gate")
+            orchestrator = Orchestrator(SimpleNamespace(), config, plugin_dir)
+            response = FakeResponse("hello <scene_director_state>{bad}</scene_director_state>")
+
+            result = orchestrator.apply_director_response(FakeEvent(self_id="bot-a"), response)
+
+            self.assertTrue(result["found"])
+            self.assertTrue(result["error"])
+            self.assertEqual(response.completion_text, "hello")
+
+    def test_dialogue_handoff_is_extracted_from_user_message(self) -> None:
+        config = SceneOrchestratorConfig(
+            mode="director_gate",
+            dialogue_enabled=True,
+            dialogue_targets={
+                "B": SimpleNamespace(
+                    bot_id="2:2855813757",
+                    mention_id="2855813757",
+                    display_name="千早爱音",
+                )
+            },
+        )
+        orchestrator = Orchestrator(SimpleNamespace(), config, Path("."))
+
+        handoff = orchestrator.extract_dialogue_handoff(
+            FakeEvent(self_id="bot-a", text="@A #对话B 从雨夜车站开始")
+        )
+
+        self.assertTrue(handoff["ok"])
+        self.assertEqual(handoff["target_key"], "B")
+        self.assertEqual(handoff["target"].mention_id, "2855813757")
+
+    def test_dialogue_handoff_can_use_display_name(self) -> None:
+        config = SceneOrchestratorConfig(
+            mode="director_gate",
+            dialogue_enabled=True,
+            dialogue_targets={
+                "B": SimpleNamespace(
+                    bot_id="2:2855813757",
+                    mention_id="2855813757",
+                    display_name="千早爱音",
+                )
+            },
+        )
+        orchestrator = Orchestrator(SimpleNamespace(), config, Path("."))
+
+        handoff = orchestrator.extract_dialogue_handoff(
+            FakeEvent(self_id="bot-a", text="@若叶睦 #对话千早爱音 话题")
+        )
+
+        self.assertTrue(handoff["ok"])
+        self.assertEqual(handoff["target_key"], "B")
+        self.assertEqual(handoff["requested_target"], "千早爱音")
+        self.assertEqual(handoff["target"].mention_id, "2855813757")
+
+    def test_unknown_dialogue_handoff_target_is_reported(self) -> None:
+        config = SceneOrchestratorConfig(
+            mode="director_gate",
+            dialogue_enabled=True,
+            dialogue_targets={},
+        )
+        orchestrator = Orchestrator(SimpleNamespace(), config, Path("."))
+
+        handoff = orchestrator.extract_dialogue_handoff(
+            FakeEvent(self_id="bot-a", text="@A #对话B")
+        )
+
+        self.assertFalse(handoff["ok"])
+        self.assertEqual(handoff["reason"], "unknown_target")
+
+    def test_dialogue_handoff_has_cooldown_and_no_loop_trigger(self) -> None:
+        config = SceneOrchestratorConfig(
+            mode="director_gate",
+            dialogue_enabled=True,
+            dialogue_cooldown_seconds=10,
+        )
+        orchestrator = Orchestrator(SimpleNamespace(), config, Path("."))
+
+        self.assertTrue(orchestrator.can_send_dialogue_handoff("group:g-1"))
+        self.assertFalse(orchestrator.can_send_dialogue_handoff("group:g-1"))
+        text = orchestrator.build_dialogue_handoff_text("B")
+        self.assertIn("#对话接力:B", text)
+        self.assertNotIn("#对话B", text)
 
     def test_speech_plan_ttl_expiry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -400,12 +593,9 @@ class WorldbookTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(worldbook.read(), "")
             self.assertFalse((Path(temp_dir) / "data" / "worldbook.md").exists())
 
-    async def test_speech_plan_prompt_includes_worldbook(self) -> None:
+    async def test_director_gate_context_includes_worldbook_without_extra_llm(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             plugin_dir = Path(temp_dir)
-            prompt_dir = plugin_dir / "prompts"
-            prompt_dir.mkdir(parents=True)
-            (prompt_dir / "speech_plan_prompt.txt").write_text("plan prompt", encoding="utf-8")
             worldbook_path = plugin_dir / "data" / "worldbook.md"
             worldbook_path.parent.mkdir(parents=True)
             worldbook_path.write_text("Shared world premise: music academy.", encoding="utf-8")
@@ -422,10 +612,10 @@ class WorldbookTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-            await orchestrator.director_gate(FakeEvent(self_id="bot-a"))
+            instruction = orchestrator.build_director_gate_instruction(FakeEvent(self_id="bot-a"))
 
-            self.assertEqual(orchestrator.llm.calls, 1)
-            self.assertIn("Shared world premise: music academy.", orchestrator.llm.prompts[0])
+            self.assertEqual(orchestrator.llm.calls, 0)
+            self.assertIn("Shared world premise: music academy.", instruction)
 
 
 if __name__ == "__main__":
